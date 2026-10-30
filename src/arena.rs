@@ -76,6 +76,7 @@ impl<T> Clone for Id<T> {
 }
 
 /// Emplacement interne (*slot*) dans l'arène contenant la valeur et sa génération actuelle.
+#[derive(Debug)]
 struct Slot<Data> {
     generation: u32,
     value: Option<Data>,
@@ -100,6 +101,7 @@ struct Slot<Data> {
 /// arena.remove(id);
 /// assert_eq!(arena.get(id), None); // L'ID est maintenant invalide
 /// ```
+#[derive(Debug)]
 pub struct Arena<Data, Tag = Data> {
     nodes: Vec<Slot<Data>>,
     free_slot: Vec<usize>,
