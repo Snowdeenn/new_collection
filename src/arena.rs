@@ -75,6 +75,18 @@ impl<T> Clone for Id<T> {
     }
 }
 
+impl<T> Ord for Id<T> {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        (self.index, self.generation).cmp(&(other.index, other.generation))
+    }
+}
+
+impl<T> PartialOrd for Id<T> {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
 /// Emplacement interne (*slot*) dans l'arène contenant la valeur et sa génération actuelle.
 #[derive(Debug)]
 struct Slot<Data> {
@@ -91,7 +103,7 @@ struct Slot<Data> {
 ///
 /// # Exemple
 /// ```rust
-/// use utils::Arena;
+/// use new_collection::Arena;
 ///
 /// let mut arena: Arena<String> = Arena::new();
 /// let id = arena.insert("Hello World".to_string());
@@ -226,13 +238,17 @@ impl<Data, Tag> Arena<Data, Tag> {
     }
 
     /// Retourne un itérateur immutable sur l'ensemble des éléments actifs de l'arène.
-    pub fn iter(&self) -> impl Iterator<Item = &Data> {
-        self.nodes.iter().filter_map(|slot| slot.value.as_ref())
+    pub fn iter(&self) -> Iter<'_, Data> {
+        Iter {
+            inner: self.nodes.iter(),
+        }
     }
 
     /// Retourne un itérateur mutable sur l'ensemble des éléments actifs de l'arène.
-    pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut Data> {
-        self.nodes.iter_mut().filter_map(|slot| slot.value.as_mut())
+    pub fn iter_mut(&mut self) -> IterMut<'_, Data> {
+        IterMut {
+            inner: self.nodes.iter_mut(),
+        }
     }
 
     /// Retourne un itérateur produisant des paires `(Id<Tag>, &Data)` pour tous les éléments actifs.
@@ -298,9 +314,156 @@ impl<Data, Tag> Default for Arena<Data, Tag> {
     }
 }
 
+/// Iterator over the occupied values of an arena.
+pub struct Iter<'a, Data> {
+    inner: std::slice::Iter<'a, Slot<Data>>,
+}
+
+impl<'a, Data> Iterator for Iter<'a, Data> {
+    type Item = &'a Data;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.inner.find_map(|slot| slot.value.as_ref())
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (0, Some(self.inner.len()))
+    }
+}
+
+impl<Data> std::iter::FusedIterator for Iter<'_, Data> {}
+
+/// Iterator over mutable references to the occupied values of an arena.
+pub struct IterMut<'a, Data> {
+    inner: std::slice::IterMut<'a, Slot<Data>>,
+}
+
+impl<'a, Data> Iterator for IterMut<'a, Data> {
+    type Item = &'a mut Data;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.inner.find_map(|slot| slot.value.as_mut())
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (0, Some(self.inner.len()))
+    }
+}
+
+impl<Data> std::iter::FusedIterator for IterMut<'_, Data> {}
+
+/// Iterator consuming the occupied values of an arena.
+pub struct IntoIter<Data> {
+    inner: std::vec::IntoIter<Slot<Data>>,
+}
+
+impl<Data> Iterator for IntoIter<Data> {
+    type Item = Data;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.inner.find_map(|slot| slot.value)
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (0, Some(self.inner.len()))
+    }
+}
+
+impl<Data> std::iter::FusedIterator for IntoIter<Data> {}
+
+impl<Data, Tag> IntoIterator for Arena<Data, Tag> {
+    type Item = Data;
+    type IntoIter = IntoIter<Data>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        IntoIter {
+            inner: self.nodes.into_iter(),
+        }
+    }
+}
+
+impl<'a, Data, Tag> IntoIterator for &'a Arena<Data, Tag> {
+    type Item = &'a Data;
+    type IntoIter = Iter<'a, Data>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
+impl<'a, Data, Tag> IntoIterator for &'a mut Arena<Data, Tag> {
+    type Item = &'a mut Data;
+    type IntoIter = IterMut<'a, Data>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter_mut()
+    }
+}
+
+impl<Data, Tag> std::ops::Index<Id<Tag>> for Arena<Data, Tag> {
+    type Output = Data;
+
+    fn index(&self, id: Id<Tag>) -> &Self::Output {
+        self.get(id).expect("invalid arena Id")
+    }
+}
+
+impl<Data, Tag> std::ops::IndexMut<Id<Tag>> for Arena<Data, Tag> {
+    fn index_mut(&mut self, id: Id<Tag>) -> &mut Self::Output {
+        self.get_mut(id).expect("invalid arena Id")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn iteration_skips_vacant_slots_and_moves_values() {
+        let mut arena: Arena<String> = Arena::new();
+        let removed = arena.insert("removed".into());
+        let kept = arena.insert("kept".into());
+        arena.remove(removed);
+        assert_eq!(
+            (&arena).into_iter().map(String::as_str).collect::<Vec<_>>(),
+            vec!["kept"]
+        );
+        for value in &mut arena {
+            value.push('!');
+        }
+        assert_eq!(arena[kept], "kept!");
+        assert_eq!(arena.into_iter().collect::<Vec<_>>(), vec!["kept!"]);
+        assert_eq!(Arena::<String>::new().into_iter().next(), None);
+    }
+
+    #[test]
+    fn indexing_through_references() {
+        let mut arena: Arena<i32> = Arena::new();
+        let id = arena.insert(1);
+        let borrowed = &mut arena;
+        borrowed[id] = 2;
+        let borrowed = &arena;
+        assert_eq!(borrowed[id], 2);
+    }
+
+    #[test]
+    #[should_panic(expected = "invalid arena Id")]
+    fn indexing_rejects_stale_generation() {
+        let mut arena: Arena<i32> = Arena::new();
+        let id = arena.insert(1);
+        arena.remove(id);
+        let _replacement = arena.insert(2);
+        let _ = arena[id];
+    }
+
+    #[test]
+    #[should_panic(expected = "invalid arena Id")]
+    fn mutable_indexing_rejects_vacant_slot() {
+        let mut arena: Arena<i32> = Arena::new();
+        let id = arena.insert(1);
+        arena.remove(id);
+        arena[id] = 2;
+    }
 
     #[test]
     fn test_insert() {
